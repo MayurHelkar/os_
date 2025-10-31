@@ -1810,3 +1810,2229 @@ That’s the final stage — the "industrial-grade" STM32 engineering layer.
 
 
 
+Excellent — this is where we enter the **final level of STM32 system mastery**.
+
+**Part 6** focuses on *system-level integration and optimization* — how you make an STM32 system not just functional or real-time, but **efficient, robust, and production-grade**.
+
+We’ll explore:
+
+* Power domains and dynamic clock scaling
+* Low-power real-time design
+* Multi-domain power management
+* Advanced debugging (ETM, SWO, DWT tracing)
+* Long-term stability validation, EMC, and production-grade reliability
+
+---
+
+# ⚙️ **STM32 In-Depth Notes — Part 6: System-Level Integration, Power Management & Reliability**
+
+---
+
+## 74. 🧭 **Philosophy of System Integration**
+
+At this stage, the challenge isn’t just “make it work fast” — it’s to **make it efficient, stable, traceable, and maintainable** under all conditions.
+
+A production STM32 system must:
+
+* Boot predictably
+* Maintain deterministic real-time performance
+* Adapt power and clock dynamically
+* Handle noise, brownouts, and aging
+* Be observable and debuggable even at runtime
+
+---
+
+## 75. ⚡ **Power Domains and Dynamic Clock Scaling**
+
+STM32 devices have **multiple power domains** and **clock trees** — enabling **dynamic performance scaling** without reboot.
+
+### 75.1 Power Domains Overview (example: STM32H7)
+
+| Domain     | Purpose       | Typical Use           |
+| ---------- | ------------- | --------------------- |
+| **VDD**    | Core logic    | Always on             |
+| **VDDA**   | Analog        | ADC/DAC reference     |
+| **VDDUSB** | USB PHY       | Only for USB          |
+| **VBAT**   | Backup        | RTC, backup registers |
+| **VREF+**  | ADC reference | Stable voltage input  |
+
+### 75.2 Clock Tree Recap
+
+```
+HSE → PLL1 → SYSCLK → AHB → APB1/2/3
+LSE/LSE32 → RTC
+PLL2/3 → Peripherals (SDMMC, FDCAN, etc.)
+```
+
+Each PLL can run independently and dynamically reconfigured.
+
+---
+
+### 75.3 Dynamic Frequency Scaling (DFS)
+
+Used to balance **performance and power** dynamically.
+
+Example (STM32H7 pseudocode):
+
+```c
+RCC_OscInitTypeDef RCC_OscInit = { ... };
+RCC_ClkInitTypeDef RCC_ClkInit = { ... };
+
+RCC_ClkInit.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK;
+RCC_ClkInit.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+RCC_ClkInit.AHBCLKDivider = RCC_SYSCLK_DIV2; // Dynamic scaling
+
+HAL_RCC_ClockConfig(&RCC_ClkInit, FLASH_LATENCY_4);
+```
+
+Use-case:
+
+* **High-speed**: DSP or data transfer
+* **Medium-speed**: control loop
+* **Low-speed**: idle or sleep
+
+> Always adjust **Flash wait states** and **voltage scaling** when changing system frequency.
+
+---
+
+## 76. 🔋 **Low-Power Real-Time Operation**
+
+Real-time systems often need to maintain **sub-millisecond responsiveness** while consuming minimal power.
+
+---
+
+### 76.1 STM32 Power Modes
+
+| Mode           | Description                     | Wake-up latency |
+| -------------- | ------------------------------- | --------------- |
+| **Run**        | Full-speed                      | N/A             |
+| **Sleep**      | CPU stopped, peripherals active | ~1 µs           |
+| **Stop 0/1/2** | Most clocks off, SRAM retained  | 5–50 µs         |
+| **Standby**    | Only RTC active                 | 100 µs+         |
+| **Shutdown**   | Everything off                  | cold boot       |
+
+---
+
+### 76.2 Real-Time Wake-Up Design
+
+Use **hardware event wakeups** instead of polling:
+
+* RTC alarm
+* Timer interrupt
+* EXTI line (button/sensor)
+* USART activity
+* ADC end-of-conversion
+
+Example:
+
+```c
+HAL_PWR_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_STOPENTRY_WFI);
+```
+
+On wake-up:
+
+* System resumes at last clock configuration.
+* Reinitialize PLL and clocks if necessary.
+
+> Use `SystemClock_Config_AfterStop()` to restore frequency.
+
+---
+
+### 76.3 Tickless RTOS Mode
+
+In FreeRTOS or RTX:
+
+* SysTick stops in sleep.
+* RTC or LPTIM triggers wake-up.
+* CPU sleeps between tasks → zero idle energy waste.
+
+```c
+#define configUSE_TICKLESS_IDLE 1
+#define configEXPECTED_IDLE_TIME_BEFORE_SLEEP 5
+```
+
+---
+
+### 76.4 Dynamic Power Scaling Strategy
+
+| Mode        | Frequency | Voltage Scale | Target           |
+| ----------- | --------- | ------------- | ---------------- |
+| Performance | 400 MHz   | Scale 1       | DSP-heavy tasks  |
+| Balanced    | 200 MHz   | Scale 2       | Normal operation |
+| Low Power   | 64 MHz    | Scale 3       | Background       |
+| Sleep       | 0 MHz     | Scale 3       | Idle             |
+
+---
+
+## 77. ⚙️ **Multi-Domain Power Management**
+
+In STM32H7 and STM32U5 families, **multiple domains** exist:
+
+* **D1 (Core + AXI)**
+* **D2 (Peripherals)**
+* **D3 (Backup, LDO, RTC)**
+
+Domains can be **powered independently**.
+
+### 77.1 Typical Power Partitioning
+
+| Domain | Function         | Power State       |
+| ------ | ---------------- | ----------------- |
+| D1     | M7 core, SRAM1   | Active            |
+| D2     | M4, DMA, GPIO    | Retained in Stop2 |
+| D3     | RTC, backup SRAM | Always on         |
+
+> M7 can sleep while M4 runs communication tasks — coordinated via hardware semaphores.
+
+---
+
+### 77.2 Power Gating
+
+Enable selective power gating using:
+
+```c
+HAL_PWREx_DisableD2Domain();  // Power off M4 + peripherals
+HAL_PWREx_EnableD2Domain();
+```
+
+Use this to save energy in multi-core systems when only one domain is active.
+
+---
+
+## 78. 🧩 **Advanced Debugging and Instrumentation**
+
+Production-grade firmware must be *observable without disruption*.
+STM32 offers several hardware-level tracing and debugging tools.
+
+---
+
+### 78.1 ETM (Embedded Trace Macrocell)
+
+* Provides **cycle-accurate instruction trace** output via SWO or 4-bit trace port.
+* Useful for performance profiling, timing verification, and crash diagnosis.
+* Captures branch decisions, ISR entry/exit, and instruction flow.
+
+> Requires **trace-enabled MCU** and **SWO/TRACE pins routed** on PCB.
+
+---
+
+### 78.2 SWO (Serial Wire Output)
+
+* Streams **printf-like trace messages** and events via SWD.
+* Bandwidth up to 10+ Mbps.
+* Integrated in **ITM (Instrumentation Trace Macrocell)**.
+
+Usage example:
+
+```c
+printf("ADC sample: %d\r\n", value);
+```
+
+automatically redirected via SWO if ITM configured.
+
+---
+
+### 78.3 DWT (Data Watchpoint and Trace)
+
+* Provides **cycle counter**, **event counters**, and **PC watchpoints**.
+* Used for latency measurement and profiling.
+
+Example:
+
+```c
+DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+uint32_t start = DWT->CYCCNT;
+// code
+uint32_t elapsed = DWT->CYCCNT - start;
+```
+
+> 1 cycle resolution timing → ideal for ISR or DMA profiling.
+
+---
+
+### 78.4 Trace Buffer (ETB / MTB)
+
+* Internal RAM-based trace storage for off-line analysis.
+* Can capture program flow without external trace hardware.
+
+---
+
+## 79. 🧠 **Reliability and Stability Validation**
+
+Building for production means **tolerating faults gracefully**.
+
+---
+
+### 79.1 Brown-Out and Reset Management
+
+| Mechanism                       | Description                  |
+| ------------------------------- | ---------------------------- |
+| **BOR (Brown-Out Reset)**       | Resets on undervoltage       |
+| **IWDG (Independent Watchdog)** | Hardware timer reset         |
+| **WWDG (Window Watchdog)**      | Early/late timeout detection |
+| **Power-on Reset (POR)**        | On cold boot                 |
+
+**Recommended setup:**
+
+* Enable BOR Level 3
+* Use both IWDG + WWDG for layered protection
+* Log reset cause (`RCC->CSR`)
+
+---
+
+### 79.2 Safe Boot Architecture
+
+* Place bootloader in **read-only Flash region**
+* CRC check firmware image before jumping
+* Use **dual-bank Flash** for safe OTA updates
+* Store persistent flags in **backup SRAM**
+
+---
+
+### 79.3 Memory Integrity
+
+* Use **ECC SRAM** (available on H7/U5)
+* Periodically verify Flash CRC
+* Avoid variable-length stacks (RTOS tasks have static stacks)
+* Guard stack regions with pattern fill for overflow detection
+
+---
+
+### 79.4 Thermal and Voltage Stress Testing
+
+* Perform **extended temperature range** testing (-40°C to +85°C)
+* Simulate voltage drops and brownouts
+* Use **thermal camera** for PCB hotspots
+
+---
+
+## 80. ⚡ **EMC and Signal Reliability for Production**
+
+### 80.1 PCB-Level EMC Control
+
+✅ Keep return paths continuous
+✅ Add ferrite beads on VDD and VDDA
+✅ Use ESD protection on all external pins
+✅ Place common-mode chokes on USB/CAN/Ethernet lines
+✅ Avoid sharp 90° trace bends
+✅ Shield analog lines and clocks
+
+---
+
+### 80.2 Clock Stability and Jitter Validation
+
+* Measure jitter on HSE/PLL with oscilloscope (<50 ps RMS ideal for high-speed ADC)
+* Use low-ESR decoupling near oscillator
+* Avoid high-frequency digital traces near HSE lines
+* Verify frequency drift over temperature
+
+---
+
+### 80.3 Production Validation Flow
+
+| Step                          | Objective                  | Tools          |
+| ----------------------------- | -------------------------- | -------------- |
+| **Boundary Scan / JTAG Test** | Hardware connectivity      | ST-LINK, JTAG  |
+| **Functional Test**           | Verify I/O and timing      | Test jig       |
+| **Burn-In**                   | Stress thermal and voltage | Oven setup     |
+| **Firmware CRC Check**        | Data integrity             | Bootloader CRC |
+| **EMC Scan**                  | Regulatory compliance      | Chamber        |
+
+---
+
+## 81. 🧩 **System Self-Monitoring and Diagnostics**
+
+### 81.1 Built-In Health Monitoring
+
+* Periodically measure VREFINT and temperature sensor.
+* Log last reset cause.
+* Monitor clock errors via **RCC_CSR** and **CSS (Clock Security System)**.
+
+### 81.2 Error Logging
+
+* Maintain non-volatile log in **backup SRAM** or **EEPROM**.
+* Include:
+
+  * Timestamp
+  * Error type
+  * Task name
+  * Stack usage
+  * Reset cause
+
+### 81.3 Field Reliability Counters
+
+* Increment “uptime hours” counter.
+* Maintain watchdog trip counters.
+* Estimate MTBF (Mean Time Between Failures) over life.
+
+---
+
+## 82. 🧮 **Advanced Debug and Validation Tools**
+
+| Tool                                      | Purpose                     |
+| ----------------------------------------- | --------------------------- |
+| **ST-Link Utility / STM32CubeProgrammer** | Flash, memory, option bytes |
+| **STM32CubeMonitor**                      | Real-time data plotting     |
+| **Keil Event Recorder / System Analyzer** | RTOS timeline tracing       |
+| **Ozone / Segger RTT Viewer**             | Live trace over SWO         |
+| **ETM Trace Viewer**                      | Instruction-level profiling |
+
+---
+
+## 83. 🛰 **Design-for-Production Summary**
+
+✅ Separate bootloader + application banks
+✅ Use watchdogs + CRC integrity checks
+✅ Enable brown-out and clock security
+✅ Include self-test routines at startup
+✅ Use low-jitter, filtered analog references
+✅ Implement power domain control
+✅ Log reset and fault info persistently
+✅ Validate thermally and electrically
+
+---
+
+## 84. 💡 **Philosophy: “Industrial-Grade Embedded Systems”**
+
+> “In production systems, predictability and reliability outweigh raw performance.”
+
+An STM32 system ready for industrial use:
+
+* Operates deterministically under any timing load
+* Minimizes idle power via dynamic scaling
+* Survives voltage, temperature, and EMC stress
+* Logs and recovers from faults autonomously
+* Provides traceable runtime data for field diagnostics
+
+This is where **embedded engineering becomes systems engineering** — where every layer, from silicon to firmware to PCB, works as a coherent whole.
+
+---
+
+## 85. 🧠 **Summary Table — The Six-Layer Mastery of STM32**
+
+| Level      | Focus              | Core Competence                 |
+| ---------- | ------------------ | ------------------------------- |
+| **Part 1** | Core architecture  | Registers, NVIC, buses          |
+| **Part 2** | Firmware structure | Interrupts, HAL, initialization |
+| **Part 3** | Peripheral theory  | UART, SPI, ADC, DMA, timers     |
+| **Part 4** | Bus & hardware     | AHB/APB, analog integrity       |
+| **Part 5** | Real-time control  | Latency, RTOS, pipelines        |
+| **Part 6** | System integration | Power, debugging, reliability   |
+
+---
+
+If you want, I can follow this with a **Part 7: “Design Patterns and Frameworks for STM32 Systems”** — covering *architectural patterns*, *firmware modularity*, *component abstraction layers*, *state machines*, *diagnostic frameworks*, and *production firmware architecture (bootloader + app + comms stack)* — essentially the “software architecture” layer that unifies all six parts into a scalable embedded platform.
+
+Would you like me to proceed with **Part 7** next?
+
+
+Perfect — this is the natural culmination of the STM32 mastery series: how to **architect entire firmware systems** for scalability, testability, and long-term maintainability.
+
+If Parts 1–6 were about *understanding and controlling the machine*,
+then **Part 7** is about *designing the software brain that runs the machine efficiently and cleanly.*
+
+---
+
+# 🧠 **STM32 In-Depth Notes — Part 7: Firmware Architecture, Design Patterns & Production Frameworks**
+
+---
+
+## 86. 🎯 **Goal of System Architecture**
+
+Real-world STM32 applications (industrial control, robotics, instrumentation, IoT gateways) often evolve over years — changing requirements, added sensors, new communication stacks.
+
+Without architecture, such firmware becomes a “spaghetti monster” of interrupt routines and HAL calls.
+
+The goal:
+
+> Design firmware that is **modular, testable, scalable, and deterministic**.
+
+---
+
+## 87. 🧩 **Core Firmware Architecture Layers**
+
+```
++----------------------------------------------------+
+| Application Layer (User Logic, Control, UI, Comms) |
++----------------------------------------------------+
+| Middleware (Protocol stacks, RTOS services)        |
++----------------------------------------------------+
+| HAL / BSP (STM32Cube HAL, Peripheral Drivers)      |
++----------------------------------------------------+
+| Hardware Abstraction (Pin mapping, power, clocks)  |
++----------------------------------------------------+
+| Hardware (MCU + Sensors + Actuators)               |
++----------------------------------------------------+
+```
+
+Each layer:
+
+* **Only depends downward**
+* Communicates upward via defined interfaces
+* Can be reused or replaced independently
+
+---
+
+## 88. ⚙️ **Hardware Abstraction Layer (HAL) & BSP Design**
+
+### 88.1 BSP (Board Support Package)
+
+Encapsulates:
+
+* GPIO pin mapping
+* Peripheral init/deinit functions
+* Power management hooks
+
+**Example structure:**
+
+```
+/BSP
+  ├── bsp_led.c
+  ├── bsp_uart.c
+  ├── bsp_adc.c
+  └── bsp_board_init.c
+```
+
+**bsp_uart.c:**
+
+```c
+void BSP_UART_Init(void) {
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    HAL_UART_Init(&huart1);
+}
+```
+
+Application code never calls `HAL_UART_Init()` directly — it calls `BSP_UART_Init()`.
+This isolates hardware details from business logic.
+
+---
+
+### 88.2 HAL Wrapping and Driver Encapsulation
+
+Wrap HAL functions into cleaner, domain-specific APIs:
+
+```c
+void Motor_SetSpeed(uint16_t speed);
+uint16_t Motor_GetCurrent(void);
+```
+
+These internally use PWM, ADC, or SPI — but upper layers don’t care.
+
+> This approach allows full hardware replacement (e.g. STM32F4 → STM32H7) with minimal code breakage.
+
+---
+
+## 89. 🧱 **Modular Firmware Architecture**
+
+Split firmware into **functionally isolated modules**.
+Each module has:
+
+* A *public header* (`module.h`)
+* A *private implementation* (`module.c`)
+* Optionally a *configuration struct*
+
+Example module directories:
+
+```
+/Modules
+  ├── comms/
+  ├── sensors/
+  ├── control/
+  ├── logging/
+  └── diagnostics/
+```
+
+---
+
+### 89.1 Module Design Template
+
+```c
+// sensor_temp.h
+typedef struct {
+    float current_value;
+    float last_value;
+} TempSensor_t;
+
+void TempSensor_Init(TempSensor_t *sensor);
+float TempSensor_Read(TempSensor_t *sensor);
+```
+
+```c
+// sensor_temp.c
+void TempSensor_Init(TempSensor_t *sensor) {
+    // ADC init, calibration
+}
+float TempSensor_Read(TempSensor_t *sensor) {
+    // Start ADC DMA, wait for conversion, return result
+}
+```
+
+This encapsulates the ADC complexity while allowing unit-level reuse and testing.
+
+---
+
+## 90. ⏱ **Real-Time Task Structure (RTOS-Based Design)**
+
+A **well-architected RTOS system** should have *task separation by function* rather than “one task per peripheral”.
+
+---
+
+### 90.1 Task Layer Example (FreeRTOS)
+
+| Task            | Responsibility                        | Priority |
+| --------------- | ------------------------------------- | -------- |
+| **SensorTask**  | Poll sensors, process ADC/DMA results | 3        |
+| **ControlTask** | Execute control loop, motor PID       | 4        |
+| **CommsTask**   | Handle UART, CAN, USB                 | 2        |
+| **LoggerTask**  | Store events or send to SWO           | 1        |
+| **IdleTask**    | Enter low power                       | 0        |
+
+All inter-task communication goes through **queues, semaphores, or event groups**.
+
+---
+
+### 90.2 Task Skeleton
+
+```c
+void ControlTask(void *arg) {
+    for(;;) {
+        xSemaphoreTake(ctrlSem, portMAX_DELAY);
+        ComputePID();
+        UpdateMotorOutputs();
+    }
+}
+```
+
+Synchronization signals:
+
+* ISR (e.g. timer) gives semaphore
+* DMA complete → control task resumes
+
+---
+
+## 91. 🔄 **Event-Driven and State Machine Architectures**
+
+Polling loops are inefficient and non-deterministic.
+Instead, use **event-driven** models.
+
+---
+
+### 91.1 Event-Driven Design
+
+* Each module has an **event queue**
+* Tasks post events instead of polling hardware
+
+Example:
+
+```c
+typedef enum {
+    EVT_UART_RX_COMPLETE,
+    EVT_SENSOR_NEW_DATA,
+    EVT_MOTOR_OVERCURRENT
+} AppEvent_t;
+```
+
+Event dispatcher routes:
+
+```c
+void App_DispatchEvent(AppEvent_t evt) {
+    switch(evt) {
+        case EVT_SENSOR_NEW_DATA: Control_Update(); break;
+        case EVT_UART_RX_COMPLETE: Comms_Process(); break;
+    }
+}
+```
+
+---
+
+### 91.2 Hierarchical State Machines (HSM)
+
+For complex control logic (e.g. motor startup, safety states), use **state machines** instead of giant switch-cases.
+
+**Example:**
+
+```c
+typedef enum { IDLE, RUNNING, FAULT } SystemState_t;
+
+void SystemSM_Run(void) {
+    switch(state) {
+        case IDLE: if(startCmd) state = RUNNING; break;
+        case RUNNING: if(faultDetected) state = FAULT; break;
+        case FAULT: if(resetCmd) state = IDLE; break;
+    }
+}
+```
+
+Frameworks like **Quantum Leaps QP/C** or **Micrium uC/OS FSMs** automate this pattern.
+
+---
+
+## 92. 🧵 **Communication Between Layers**
+
+### 92.1 Message Passing (Queues)
+
+RTOS-safe, non-blocking communication.
+
+```c
+typedef struct {
+    uint8_t id;
+    uint8_t data[8];
+} Msg_t;
+
+xQueueSend(commsQueue, &msg, 0);
+```
+
+### 92.2 Publish–Subscribe (Event Broker)
+
+Decouples producers and consumers.
+
+Example:
+
+* “Sensor updated” → subscribers notified automatically
+* Reduces inter-module coupling
+
+---
+
+## 93. 🧮 **Timing Determinism and Scheduling**
+
+Even modular designs can lose determinism if scheduling isn’t controlled.
+
+### Guidelines:
+
+* Assign priority strictly by *timing criticality*
+* Never use `vTaskDelay()` in control loops → use hardware timer interrupts
+* Bound all blocking API calls
+* Use **execution time measurements** with DWT to guarantee deadlines
+
+---
+
+## 94. 🧰 **Diagnostic and Logging Frameworks**
+
+Every production firmware should have **runtime introspection**.
+
+### 94.1 System Log Levels
+
+```c
+#define LOG_INFO(...)  ...
+#define LOG_WARN(...)  ...
+#define LOG_ERROR(...) ...
+```
+
+Output via UART/SWO/RTT, with compile-time filtering.
+
+### 94.2 Fault Logging
+
+Record:
+
+* Timestamp
+* Task name
+* Exception cause (HardFault, WWDG, etc.)
+* CPU load, heap usage
+
+Store in backup SRAM or external EEPROM.
+
+---
+
+### 94.3 Watchdog Integration
+
+Each task periodically “feeds” its watchdog token:
+
+```c
+void WatchdogTask(void *arg) {
+    for(;;) {
+        FeedWatchdog();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+```
+
+If a task stalls → watchdog reset with log recovery on reboot.
+
+---
+
+## 95. 🧠 **Configuration Management**
+
+### 95.1 Versioned Configuration Structure
+
+```c
+typedef struct {
+    uint16_t version;
+    uint8_t nodeID;
+    uint32_t baudRate;
+    float offset;
+} Config_t;
+```
+
+Stored in Flash with CRC:
+
+```c
+if (config.version != EXPECTED_VERSION) {
+    LoadDefaultConfig();
+}
+```
+
+> Always version configuration structures to maintain OTA compatibility.
+
+---
+
+## 96. 📡 **Bootloader + Application Architecture**
+
+### 96.1 Dual-Image Bootloader Concept
+
+* Bootloader verifies firmware integrity via CRC
+* Swaps active bank after successful OTA
+* Supports rollback on failure
+
+```
++-----------+
+| Bootloader| (Bank 1)
++-----------+
+| App Slot A| (Bank 2)
+| App Slot B| (Bank 3)
++-----------+
+```
+
+### 96.2 Secure Boot Additions
+
+* Validate digital signature (RSA/ECC)
+* Store keys in read-protected Flash
+* Lock option bytes (RDP level 1/2)
+
+---
+
+## 97. 🧩 **Scalable Communication Framework**
+
+Use abstracted interfaces:
+
+```c
+typedef struct {
+    void (*send)(uint8_t *buf, uint16_t len);
+    void (*receive)(uint8_t *buf, uint16_t len);
+} CommsInterface_t;
+```
+
+This allows the same API for:
+
+* UART
+* USB CDC
+* CAN
+* Ethernet
+
+→ Protocols like Modbus, MQTT, or custom framing layers become transport-agnostic.
+
+---
+
+## 98. 🧠 **Memory and Resource Management Patterns**
+
+### 98.1 Static Allocation
+
+No dynamic malloc in real-time firmware.
+Preallocate:
+
+* Task stacks
+* Queues
+* Buffers
+
+### 98.2 Memory Pools
+
+Implement fixed-size block pools for deterministic memory usage.
+
+```c
+static uint8_t pool[POOL_SIZE][BLOCK_SIZE];
+```
+
+---
+
+## 99. 🧩 **Unit Testing and Simulation**
+
+### 99.1 Host-Based Testing
+
+Compile logic modules on PC:
+
+* Mock hardware functions
+* Validate algorithms and state machines
+* CI/CD integration via CMake or Ceedling
+
+### 99.2 Hardware-in-the-Loop (HIL)
+
+STM32 + test harness simulating sensors and actuators.
+Used for:
+
+* Control loop validation
+* Fault injection
+* Timing analysis
+
+---
+
+## 100. ⚙️ **Design Patterns Summary**
+
+| Pattern                  | Use Case              | STM32 Application      |
+| ------------------------ | --------------------- | ---------------------- |
+| **State Machine**        | Control sequences     | Motor startup, safety  |
+| **Observer (Pub/Sub)**   | Event propagation     | Sensor updates         |
+| **Singleton**            | Global service        | Logger, Config manager |
+| **Command**              | Actions encapsulation | Protocol handler       |
+| **Strategy**             | Algorithm swapping    | PID vs fuzzy control   |
+| **Layered Architecture** | Scalability           | Whole firmware design  |
+
+---
+
+## 101. 🏗 **Firmware Architecture Example (Full)**
+
+```
+/App
+   ├── main.c
+   ├── tasks.c
+   ├── app_events.c
+/Middleware
+   ├── comms_stack/
+   ├── diagnostics/
+   ├── protocol_modbus.c
+/BSP
+   ├── bsp_uart.c
+   ├── bsp_gpio.c
+/Modules
+   ├── motor_control/
+   ├── sensor_temp/
+   ├── logger/
+/Core
+   ├── system_stm32h7xx.c
+   ├── freertos_port.c
+```
+
+---
+
+## 102. 💡 **Philosophy of Maintainable Embedded Design**
+
+> “Good firmware is not written for one project. It’s engineered as a platform.”
+
+A solid STM32 framework:
+
+* Runs deterministically in real time
+* Can be extended without code breakage
+* Is traceable, logged, and fault-tolerant
+* Can be built and tested automatically
+* Survives hardware evolution gracefully
+
+---
+
+## 103. 🌍 **From MCU to Embedded Platform**
+
+At this level, the STM32 is no longer “a chip.”
+It’s a **hardware node in a distributed embedded system**, capable of:
+
+* Multi-tasking control loops
+* Asynchronous sensor fusion
+* Secure firmware management
+* Real-time logging and self-diagnosis
+* Reliable long-term field operation
+
+This is the **platform-level thinking** that distinguishes advanced embedded engineers from firmware coders.
+
+---
+
+✅ **End of Part 7** — *STM32 Firmware Architecture and Design Patterns.*
+
+---
+
+If you want, I can continue with **Part 8: “Embedded Networking and Connectivity Frameworks”** — covering STM32 Ethernet, CAN FD, USB, Modbus, MQTT, and multi-node synchronization theory (including time-synchronized distributed control using PTP and TSN concepts).
+
+Would you like me to proceed with **Part 8** next?
+
+
+Excellent — this is the natural continuation into **networked embedded systems** — where multiple STM32 devices, sensors, and controllers communicate deterministically, securely, and efficiently.
+
+Part 8 will cover how to integrate STM32 devices into **distributed, real-time networks**, both wired and wireless, with attention to timing, reliability, and architectural scalability.
+
+---
+
+# 🌐 **STM32 In-Depth Notes — Part 8: Embedded Networking, Connectivity & Distributed Synchronization**
+
+---
+
+## 104. 🎯 **Goal of Networked Embedded Design**
+
+Standalone controllers are rare in modern systems.
+Today’s STM32s must:
+
+* exchange data across buses (CAN, SPI, I²C, UART),
+* integrate with field or industrial networks (Modbus, EtherCAT, CANopen),
+* or connect to the cloud (Ethernet, Wi-Fi, MQTT).
+
+The objectives:
+
+> Achieve **deterministic communication**, **low latency**, and **fault-tolerant data exchange** under real-time constraints.
+
+---
+
+## 105. 🧩 **Communication Layering in Embedded Systems**
+
+Similar to the OSI model, embedded networking follows layered design:
+
+```
++--------------------------------------------------+
+| Application Layer (Control, Diagnostics, Cloud)  |
++--------------------------------------------------+
+| Protocol Layer (CANopen, Modbus, MQTT, etc.)     |
++--------------------------------------------------+
+| Transport Layer (CAN, TCP/UDP, USB CDC, UART)    |
++--------------------------------------------------+
+| Physical Layer (RS-485, Ethernet PHY, RF, etc.)  |
++--------------------------------------------------+
+| Hardware (STM32 + Transceiver/PHY)               |
++--------------------------------------------------+
+```
+
+Each layer has clear boundaries.
+The firmware defines interfaces between them for easy replacement (e.g., UART → Ethernet with no logic changes).
+
+---
+
+## 106. ⚙️ **Serial Communication Fundamentals**
+
+### 106.1 UART
+
+* Asynchronous, byte-oriented
+* Typical uses: CLI, Modbus-RTU, debug console
+* Error sources: baud mismatch, noise, framing errors
+
+💡 **Theory:** UART uses start/stop bits and oversampling (16×).
+DMA or IDLE-line detection reduces CPU load.
+
+```c
+// Example: Non-blocking UART reception
+HAL_UARTEx_ReceiveToIdle_DMA(&huart1, rx_buf, RX_SIZE);
+```
+
+---
+
+### 106.2 SPI
+
+* Synchronous, full-duplex, master/slave
+* Common for sensors, displays, fast ADCs
+* Adjustable clock polarity/phase (CPOL, CPHA)
+* DMA used for burst transfers
+
+💡 **Theory:** Clocked shift register; latency = (Nbits / fSPI).
+Use chip-select synchronization and DMA chaining for efficiency.
+
+---
+
+### 106.3 I²C
+
+* Multi-master, half-duplex
+* Addressed protocol; open-drain bus
+* Sensitive to bus capacitance and noise
+
+💡 **Tip:** Use **Fast-Mode+ (1 MHz)** with 20–30 cm total trace length max.
+Use 2.2 kΩ pull-ups for reliable rise time.
+
+---
+
+## 107. 🚌 **Industrial Buses: CAN and CAN FD**
+
+### 107.1 CAN Classic
+
+* 1 Mbps max, differential signaling
+* Message-based (ID identifies priority)
+* Error-tolerant, CRC-checked
+* Arbitration ensures determinism
+
+💡 **Theory:** Lower ID = higher priority (bit-dominant arbitration).
+Perfect for safety-critical control loops.
+
+---
+
+### 107.2 CAN FD (Flexible Data Rate)
+
+* Up to 8 Mbps in data phase
+* Payload up to 64 bytes
+* Backward compatible with classic CAN
+
+Example STM32 configuration:
+
+```c
+FDCAN_ConfigTypeDef cfg = {
+  .NominalPrescaler = 1,
+  .DataPrescaler = 2,
+  .FrameFormat = FDCAN_FRAME_FD_BRS
+};
+HAL_FDCAN_ConfigGlobalFilter(&hfdcan, FDCAN_ACCEPT_ALL, ...);
+```
+
+💡 **Use cases:** high-bandwidth sensors, real-time distributed systems.
+
+---
+
+### 107.3 CANopen and DeviceNet
+
+* Protocol stacks on top of CAN
+* Define object dictionaries and PDO/SDO mapping
+* Offer plug-and-play interoperability between nodes
+
+STM32-based controllers often use free or commercial CANopen stacks integrated with FreeRTOS tasks.
+
+---
+
+## 108. ⚙️ **Fieldbus and Industrial Protocols**
+
+### 108.1 Modbus RTU / ASCII
+
+* Simple master/slave (query-response)
+* Runs on UART/RS-485
+* CRC-16 protected
+* Easy to implement, widely supported
+
+💡 **Determinism:** Because only one master talks at a time.
+
+---
+
+### 108.2 Modbus TCP
+
+* Same protocol on TCP/IP stack (Ethernet)
+* Multi-master possible
+* Slightly higher latency but flexible
+
+STM32 F7/H7 with LwIP stack supports Modbus TCP using CubeMX middleware.
+
+---
+
+### 108.3 Ethernet-Based Industrial Protocols
+
+| Protocol     | Determinism          | Notes                                    |
+| ------------ | -------------------- | ---------------------------------------- |
+| **Profinet** | Medium               | Needs RTOS + Ethernet stack              |
+| **EtherCAT** | Very high            | Hardware-assisted; limited STM32 support |
+| **OPC UA**   | Low (cloud-oriented) | Heavy; used for gateways                 |
+| **MQTT-SN**  | Medium               | For IoT sensor networks                  |
+
+---
+
+## 109. 🌐 **Ethernet and TCP/IP on STM32**
+
+### 109.1 Ethernet MAC & PHY Overview
+
+* MAC integrated in STM32F4/F7/H7
+* PHY external via RMII/MII interface
+* DMA-driven transmit/receive descriptors
+
+💡 **Data Path:**
+`App → LwIP → DMA descriptor → MAC → PHY → Network`
+
+### 109.2 LwIP Stack Integration
+
+Configured through CubeMX:
+
+* Static or DHCP IP
+* TCP/UDP sockets
+* Optional RTOS integration
+
+Example UDP send:
+
+```c
+struct netconn *conn;
+conn = netconn_new(NETCONN_UDP);
+netconn_connect(conn, IP_ADDR_ANY, 5000);
+netconn_send(conn, &buf);
+```
+
+---
+
+### 109.3 Deterministic Ethernet (PTP / IEEE 1588)
+
+* Precision Time Protocol synchronizes nodes to <100 ns
+* Supported in STM32F7/H7 MAC hardware
+
+💡 Used in **distributed control** (e.g., synchronized motor drives).
+
+Implementation involves:
+
+* Configuring ETH_PTP clock
+* Timestamping RX/TX frames
+* Adjusting local clock via servo algorithm
+
+---
+
+## 110. 📡 **Wireless Connectivity**
+
+### 110.1 Bluetooth LE (via external module)
+
+* UART/HCI or SPI interface
+* STM32 acts as host processor running BLE stack (e.g., BlueNRG)
+* Typical use: configuration, telemetry
+
+### 110.2 Wi-Fi Modules
+
+* ESP32, Murata, or Inventek modules via UART/SPI
+* TCP/IP offload reduces MCU load
+
+### 110.3 LoRa / Sub-GHz
+
+* Long-range, low-power networks (SF7–SF12)
+* STM32WL integrates transceiver + MCU
+
+### 110.4 Cellular (NB-IoT, LTE-M)
+
+* Serial AT command interface
+* Use message-based abstraction layer to share with MQTT/HTTP modules
+
+---
+
+## 111. 🧠 **MQTT and Cloud Integration**
+
+### 111.1 MQTT Basics
+
+* Publish/subscribe protocol over TCP
+* Extremely lightweight
+* QoS levels (0, 1, 2) define delivery guarantees
+
+### 111.2 STM32 Implementation
+
+* LwIP + MbedTLS + MQTT-C or Paho embedded client
+* Connect to broker (local or cloud)
+
+Example workflow:
+
+```c
+mqtt_client_t *client = mqtt_client_new();
+mqtt_connect(client, &broker_ip, 1883, mqtt_connection_cb, 0, &conn_opts);
+mqtt_publish(client, "sensor/temp", payload, len, 0, 0);
+```
+
+### 111.3 Security Layer
+
+* TLS via MbedTLS or WolfSSL
+* Certificates stored in Flash
+* Hardware RNG and TRNG used for session keys
+
+---
+
+## 112. ⏱ **Time Synchronization and Determinism**
+
+### 112.1 Real-Time Constraints
+
+Distributed control systems must know:
+
+* Exact timing of each measurement
+* When each actuator acted
+
+Even microseconds of drift can destabilize a feedback loop.
+
+---
+
+### 112.2 Synchronization Methods
+
+| Method                            | Accuracy | Notes                      |
+| --------------------------------- | -------- | -------------------------- |
+| **NTP (Network Time Protocol)**   | ±1 ms    | Internet-level sync        |
+| **PTP (Precision Time Protocol)** | ±100 ns  | Industrial networks        |
+| **Trigger Lines (GPIO)**          | ±10 ns   | Hardware sync between MCUs |
+| **Timestamped Data Packets**      | ±10 µs   | Software alignment         |
+
+STM32 H7 supports **hardware timestamping** for PTPv2;
+alternatively, synchronize via **shared PPS (Pulse Per Second)** line.
+
+---
+
+## 113. ⚙️ **Distributed Control and Data Flow Design**
+
+### 113.1 Architectures
+
+1. **Centralized Controller:**
+   One STM32 processes all data; slaves send sensor readings.
+2. **Decentralized Network:**
+   Each node handles local control and syncs key variables.
+3. **Hybrid Supervisory:**
+   Hierarchy of low-latency CAN nodes + Ethernet master.
+
+### 113.2 Synchronization Topology Example
+
+```
+PTP Master (STM32H7)
+ ├── CAN Node 1 (Motor)
+ ├── CAN Node 2 (Sensor Hub)
+ └── UDP Diagnostics to PC
+```
+
+Each node timestamps data → master aligns in time domain.
+
+---
+
+## 114. 🧮 **Network Performance Optimization**
+
+| Technique                | Description                      |
+| ------------------------ | -------------------------------- |
+| **DMA Chaining**         | Overlap computation and transfer |
+| **Zero-Copy Buffers**    | LwIP option to avoid memcpy      |
+| **Interrupt Coalescing** | Batch network interrupts         |
+| **Hardware CRC**         | Offload frame checksum           |
+| **Flow Control**         | Manage RX/TX buffer overflow     |
+
+Measure round-trip and jitter using DWT cycle counter.
+
+---
+
+## 115. 🧩 **Security and Reliability in Networking**
+
+### 115.1 Hardware Security
+
+* AES, SHA, RNG accelerators
+* RDP (Readout Protection)
+* Secure boot & firmware authentication
+
+### 115.2 Network Security
+
+* TLS/DTLS for TCP/UDP
+* Challenge-response handshake for command interfaces
+* Watchdog on network tasks to prevent hangs
+
+### 115.3 Fault Tolerance
+
+* Message retries
+* Sequence numbering
+* Redundant paths (dual CAN/Ethernet)
+
+---
+
+## 116. 🧱 **Multi-Node Debugging & Diagnostics**
+
+* Use SWO logging per node with unique ID
+* Central diagnostic aggregator collects logs over UART/CAN
+* Timestamp all events → post-analysis of timing drift and message latency
+
+---
+
+## 117. 🌍 **Designing Networked Embedded Ecosystems**
+
+For a fleet of STM32 nodes:
+
+1. **Common communication framework** (abstracted driver layer)
+2. **Unified timebase** (PTP or shared RTC sync)
+3. **Common diagnostic channel**
+4. **Versioned firmware + OTA update capability**
+5. **Central monitoring dashboard**
+
+---
+
+## 118. 💡 **Philosophy: “Connected Real-Time Systems”**
+
+> “Networking in embedded systems isn’t just about data exchange — it’s about **temporal coordination**.”
+
+A well-designed STM32 network:
+
+* Shares a synchronized clock base
+* Transmits deterministically (bounded latency)
+* Recovers gracefully from node failures
+* Protects its communication links cryptographically
+* Provides unified diagnostic visibility
+
+---
+
+## 119. 🧩 **Summary Table — Connectivity Landscape**
+
+| Layer              | Technology                 | Typical STM32 Use |
+| ------------------ | -------------------------- | ----------------- |
+| **Physical**       | UART, RS-485, Ethernet, RF | Links             |
+| **Link/Transport** | CAN FD, TCP/UDP, USB CDC   | Reliable delivery |
+| **Protocol**       | Modbus, MQTT, Custom       | Data semantics    |
+| **Sync**           | PTP, PPS, RTC align        | Determinism       |
+| **Application**    | Control, Telemetry, OTA    | Logic             |
+
+---
+
+## 120. 🚀 **Outlook — Toward Distributed Intelligence**
+
+Once STM32 nodes can communicate and synchronize deterministically, you can evolve toward:
+
+* **Coordinated multi-MCU control** (robotics, motion platforms)
+* **Edge data fusion** (sensor networks)
+* **Hierarchical IoT systems** (local control + cloud analytics)
+
+This merges embedded control with networking and systems engineering — the domain of **cyber-physical systems**.
+
+---
+
+✅ **End of Part 8 — Embedded Networking and Distributed Synchronization Theory**
+
+---
+
+Would you like me to proceed with **Part 9**, focusing on **Safety-Critical and Functional-Safety Design** (ISO 26262 / IEC 61508), including redundancy, fail-safe state machines, SIL validation, and diagnostic coverage techniques for STM32?
+
+
+Great — Part 9: **Safety-Critical & Functional-Safety Design for STM32** — coming right up. This part is dense and practical: it explains how to design STM32-based systems to meet **ISO 26262 / IEC 61508**-style functional-safety requirements, how to architect redundancy and fail-safe state machines, how to perform SIL/ASIL validation and calculate diagnostic coverage, and what diagnostics, tests, and artifacts you’ll need for certification.
+
+I’ll cover: requirements → architecture patterns → diagnostics → FMEDA / diagnostic coverage → test & verification → production/process items → concrete STM32-specific techniques & examples.
+
+---
+
+# Part 9 — Safety-Critical & Functional-Safety Design (ISO 26262 / IEC 61508)
+
+---
+
+## 1 — Safety engineering quick summary
+
+* **Functional safety** = guarantee system performs correctly in response to its inputs and fails to a safe state when faults occur.
+* Standards (ISO 26262 for automotive, IEC 61508 for general industry) require: hazard analysis, safety requirements, architectural measures, diagnostics, verification/validation, and safety case evidence.
+* Key concepts: **ASIL / SIL** assignment, **fault avoidance**, **fault detection**, **fault tolerance / redundancy**, and **systematic capability** (process/tool quality).
+
+---
+
+## 2 — Safety lifecycle & artifacts you must produce
+
+Minimum set of artifacts for a safety project:
+
+* **Hazard Analysis & Risk Assessment (HARA)** → assign ASIL/SIL to functions.
+* **Safety Requirements Specification (SRS)** — system-level & software-level requirements.
+* **Safety Plan** — V&V, test strategy, tooling, independence.
+* **Architecture & Design docs** — HW/SW partitioning, fault containment.
+* **FMEDA / FMEA** — failure modes, effects, diagnostic coverage (DC), safe failure fraction (SFF).
+* **Verification & Validation reports** — unit tests, integration tests, HIL, SIL/MIL results.
+* **Traceability matrix** — requirements ↔ tests ↔ code.
+* **Configuration Management & Change Control** records.
+* **Tool qualification evidence** for tools used in the safety argument.
+
+---
+
+## 3 — Mapping ASIL/SIL to architecture & techniques
+
+Higher ASIL/SIL requires stronger measures:
+
+* **ASIL A/B (low)**: Single-channel with strong diagnostics may suffice.
+* **ASIL C/D (high)**: Typically require redundancy (dual-channel), diversity, and independent monitoring.
+
+Common safety tactics:
+
+* **Fault detection** (CRC, parity, watchdog, plausibility checks)
+* **Fault containment** (MPU, process isolation)
+* **Fault tolerance** (redundant sensor/actuator chains)
+* **Safe state transitions** (fail-safe shutdown, limp-home)
+
+---
+
+## 4 — Hardware redundancy patterns
+
+1. **Dual Channel with Cross-Monitoring (1oo2 with diagnostics)**
+
+   * Two independent channels (A & B) compute same function.
+   * Cross-compare outputs and status; if mismatch, enter safe state or degrade gracefully.
+
+2. **Lockstep / Paired Cores**
+
+   * True lockstep executes identical code with cycle-by-cycle comparison (rare on STM32; needs HW support).
+   * Dual-core STM32H7 can be used for diverse execution but requires explicit synchronization and comparison.
+
+3. **1oo2 with voter**
+
+   * Two channels and a voter (or 2oo3 for higher safety). If disagreement, majority rules or safe-shutdown.
+
+4. **Sensor redundancy**
+
+   * Two or more sensors measure same quantity; use plausibility checks, median filters, and plausibility voting.
+
+5. **Actuator redundancy**
+
+   * Use dual actuators with independent drivers and monitors.
+
+**Design note:** redundancy must be *physically independent* (separate power rails, isolated traces) to avoid common-mode failures.
+
+---
+
+## 5 — Software redundancy & diversity
+
+* **N-version programming**: two functionally-equivalent implementations (different teams/algorithms/languages) reduce systematic fault correlation; expensive but highly effective.
+* **Diverse toolchains** or different optimization settings can reduce common-mode SW faults.
+* **Run-time checks**: built-in self-tests (BIST), control-flow integrity (CFI), stack canaries, and periodic consistency checks.
+
+---
+
+## 6 — Fail-safe state machines and safety handlers
+
+### Fail-safe state machine pattern
+
+* Define **SAFE**, **DEGRADED**, **OPERATIONAL**, **FAULT** states.
+* All transitions triggered by well-defined events; fault transitions lead deterministically to SAFE or DEGRADED state.
+* Safety handler monitors diagnostics and forces safe transitions.
+
+Pseudocode skeleton:
+
+```c
+typedef enum {STATE_SAFE, STATE_DEGRADED, STATE_OPERATIONAL, STATE_FAULT} sys_state;
+
+void safety_monitor_tick() {
+    diag_t d = sample_diagnostics();
+    if (d.critical_fault) {
+        request_state(STATE_SAFE);
+    } else if (d.recoverable_fault) {
+        request_state(STATE_DEGRADED);
+    }
+}
+
+void request_state(sys_state s) {
+    // atomic state transition with logging and watchdog kick suppression
+    atomic_write(&system_state, s);
+    perform_state_entry_actions(s);
+}
+```
+
+**Key:** All actuators must be set to a **known safe output** as part of the transition.
+
+---
+
+## 7 — Diagnostics: detection mechanisms & examples
+
+**Essential categories**
+
+* **Hardware self-tests**: SRAM/Flash ECC, CRC check of code, peripheral self-test.
+* **Software self-tests**: Vector table checksum, stack integrity, control-flow check, return value monitoring.
+* **Runtime plausibility**: sensor range checks, cross-sensor consistency, temporal consistency.
+* **Communication integrity**: CRCs, sequence numbers, timeouts.
+* **Health monitoring**: watchdog (IWDG + WWDG), power monitoring (BOR), clock security system (CSS).
+
+**Concrete STM32 examples**
+
+* **CRC peripheral**: compute CRC on firmware and critical data.
+* **SRAM/Flash ECC**: use ECC where available (some STM32 families have ECC on SRAM).
+* **Option bytes & RDP**: protect bootloader/keys and restrict readout.
+* **Independent Watchdog (IWDG)**: hardware watchdog running off LSI (cannot be disabled), must be serviced correctly.
+* **Window Watchdog (WWDG)**: detect stuck code refreshing too early/late.
+* **Clock Security System (CSS)**: automatically detect HSE failure and switch to HSI.
+* **PVD (Programmable Voltage Detector)**: detect undervoltage events.
+
+---
+
+## 8 — FMEDA & Diagnostic Coverage (DC)
+
+**FMEDA** (Failure Modes, Effects & Diagnostic Analysis) gives you:
+
+* **Failure rates** (λ) per component (from parts data or vendor)
+* **Failure modes**: safe vs dangerous
+* **Diagnostics’ coverage** (DC) = fraction of dangerous failures detected by diagnostics
+* **Safe Failure Fraction (SFF)** used to derive SIL/ASIL
+
+**Basic DC calculation idea**
+
+* For a subsystem, if total dangerous failure rate = λd, and detected dangerous failure rate = λdd, then DC = λdd / λd.
+* For high ASIL/SIL you need high DC (e.g., >90–99% depending on safety level and redundancy).
+
+**Practical steps**
+
+1. Enumerate failure modes for each HW/SW element.
+2. For each mode, determine detectability (by CRC, watchdog, plausibility, parity/ECC).
+3. Add diagnostic tests with measurable coverage and frequency.
+4. Calculate residual failure rate and SFF. Use vendor tables and FMEDA templates.
+
+---
+
+## 9 — Diagnostic test frequency & latency trade-off
+
+* **Continuous diagnostics** (e.g., CRC on messages, parity) detect faults immediately but cost CPU/perf.
+* **Periodic diagnostics** (BIST every N seconds) trade latency for load reduction.
+* Safety analysis must bound **time to detect** a dangerous failure and ensure control action or safe shutdown within required reaction time.
+
+Design rule:
+
+* Set diagnostic interval << maximum allowable undetected failure duration defined in HARA.
+
+---
+
+## 10 — Runtime verification strategies
+
+* **Heartbeat + Supervisor**: critical tasks publish heartbeat; a supervisor checks heartbeats and triggers safe action when missing.
+* **Watchdog cascade**: software watchdog (timer in RTOS) + hardware watchdog ensures secondary defense.
+* **Control-flow monitoring**: use signature-based CFI or checksums on critical code paths.
+* **Stack watermarking**: fill stacks with known pattern at boot and periodically check remaining depth to detect overflows.
+* **Memory protection (MPU)**: protect stacks and critical data from corruption.
+
+---
+
+## 11 — Safe boot, secure firmware update & flash management
+
+Key requirements:
+
+* **Boot integrity**: verify firmware CRC/signature before execution. If verification fails → safe state or recovery.
+* **Dual-bank flash**: allow rollback if new image fails.
+* **Atomic update**: ensure update can resume/rollback on power loss.
+* **Non-volatile diagnostics**: store last error/stack dump in backup SRAM or protected Flash for post-mortem.
+
+**STM32 practices**
+
+* Use CRC peripheral to check image integrity.
+* Use option bytes to protect critical bootloader regions.
+* Implement staged boot: bootloader → verify application → handover.
+
+---
+
+## 12 — Watchdog usage patterns (IWDG + WWDG)
+
+* **IWDG**: final hardware safety net; runs independently and must be refreshed regularly by healthy software.
+* **WWDG**: detects too-early refresh; useful where timing constraints are strict (ensures forward progress, not just liveliness).
+* **Design:** refresh IWDG only from a supervised task that validates system health and that other tasks are alive (heartbeat aggregation).
+
+---
+
+## 13 — Memory & data integrity techniques
+
+* **ECC/Parity**: enable ECC where hardware supports it. For critical data, add software parity or CRC.
+* **Redundant storage**: store critical config in two independent Flash sectors with majority voting and CRC.
+* **Checksums for variables**: protect parameter blocks and calibration constants with CRC and version numbers.
+
+---
+
+## 14 — MPU / Privilege separation & fail containment
+
+* Use **MPU** to partition memory regions (stacks, heaps, peripheral registers) to limit damage from software faults.
+* In RTOS, run high-criticality tasks with privileged access and low-criticality tasks unprivileged.
+* Combine with stack guards and watchdogs.
+
+---
+
+## 15 — Fault injection, test & verification
+
+Essential testing strategy:
+
+* **Unit tests**: on host (MIL) for logic correctness.
+* **Integration tests**: on target (SIL/HIL) for timing and HW interactions.
+* **HIL tests**: exercise boundary conditions, sensor faults, bus faults.
+* **Fault injection**: inject CPU exceptions, memory corruptions, power drops, sensor errors, communication faults.
+* **Stress & aging tests**: long-term soak tests to reveal latent hardware failures.
+* **Safety validation**: show that for each hazard, system enters safe state within required time.
+
+**Examples of injected faults**
+
+* Short sensor to ground
+* Stuck-at values
+* CRC mismatch on messages
+* Random bit flips in RAM
+* Watchdog suppression
+
+---
+
+## 16 — Tool/process requirements & independence
+
+* **Process**: follow V-model (requirements → design → implementation → test → integration → validation).
+* **Independence**: for high ASIL/SIL, V&V must be partially independent from development team.
+* **Tool qualification**: static analyzers, compilers, test frameworks used in safety path may need qualification or evidence of capability.
+* **Coding standards**: MISRA C / CERT C and enforcement via static analysis.
+
+---
+
+## 17 — Safety case & certification strategy
+
+Your final safety argument must show:
+
+1. Hazards identified & risk reductions required.
+2. System/SW architecture and how safety requirements are implemented.
+3. FMEDA/FMEA and residual risks.
+4. Test evidence: unit, integration, HIL, fault injection.
+5. Process evidence: configuration control, requirements traceability, tool controls.
+6. Runtime diagnostics & safe state behavior documented & proven.
+
+---
+
+## 18 — Concrete STM32-centric measures (summary & checklist)
+
+Use these STM32 features and practices to implement safety measures:
+
+Hardware features:
+
+* Enable **BOR**, **PVD**, **CSS** (clock failure detection).
+* Use **IWDG** (independent) + **WWDG** (window) for layered watchdog.
+* Use **CRC peripheral** for code/data checks.
+* Use **hardware ECC** on supported SRAM & Flash where available.
+* Use **option bytes / RDP** to protect flash/keys.
+* Use **backup SRAM** for diagnostic logs and critical counters.
+* Partition using **MPU** and use privileged/unprivileged execution.
+
+Software/process features:
+
+* Implement **bootloader** with signed/CRC-validated firmware.
+* Use **dual-bank Flash** for atomic update & rollback.
+* Implement **redundancy** at sensor and compute levels (physical separation).
+* Implement **heartbeat & supervisor** task architecture.
+* Perform **FMEDA** and compute **diagnostic coverage** with measured detection probabilities.
+* Configure and test **clock switching** scenarios (HSE failover to HSI, etc.).
+* Enforce **stack bounds** and use stack watermarking.
+* Use **static analysis**, code reviews, and MISRA enforcement.
+
+---
+
+## 19 — Example: Safety module checklist (template)
+
+For each safety-critical function:
+
+1. **Requirement**: e.g., “Stop motor within 50 ms on overcurrent”
+2. **Safety level**: ASIL C
+3. **Architecture**: Dual sensor, primary controller + independent monitor
+4. **Diagnostics**: Current sense plausibility, ADC CRC, watchdog
+5. **Reaction**: Immediate cut PWM & open brake relay → STATE_SAFE
+6. **FMEDA entry**: failure modes, detection means, DC estimate
+7. **Test case**: Inject overcurrent, measure reaction time & final state
+8. **Acceptance criteria**: reaction time ≤ 50 ms, diagnostic detected, restart via authenticated command only
+9. **Trace**: Requirement → code module → test ID
+
+---
+
+## 20 — Example fail-safe state transition code (pattern)
+
+Pseudocode for immediate safe action when hardware fault detected:
+
+```c
+void handle_critical_fault(const char* reason) {
+    // 1) Atomic stop of actuators
+    PWM_StopAll();
+    SetActuatorToSafePosition();
+
+    // 2) Disable main power / open contactor if needed
+    Contactor_Open();
+
+    // 3) Freeze state and log error to backup SRAM
+    store_error_log(reason, get_timestamp());
+
+    // 4) Trigger hardware watchdog to force reset if recovery not permitted
+    while(1) { __WFI(); } // Let IWDG reset the system
+}
+```
+
+**Important:** Ensure the sequence cannot be interrupted or leave actuators in unsafe state. Use direct register writes if necessary in critical path.
+
+---
+
+## 21 — FMEDA / Diagnostic Coverage calculation example (conceptual)
+
+Suppose a sensor path has:
+
+* Failure rate λ_total = 100 FIT
+* Diagnostics detect λ_detected = 95 FIT
+
+Then DC = 95 / 100 = 95%. SFF depends on safe failure and residual dangerous failures. Use FMEDA tools to combine subsystems and propagate to system SFF. Match required SFF for target SIL/ASIL with redundancy if necessary.
+
+---
+
+## 22 — Practical tips & pitfalls
+
+* **Avoid single points of failure** in sensors, power supplies, and braking actuators.
+* **Do not** rely solely on software watchdog for critical hardware shutdown.
+* **Do** separate safety functions physically (separate connectors, traces, power).
+* **Do** measure and document time to detect & time to react for each hazardous scenario.
+* **Do** implement repeatable, automated test harness (HIL) with fault injection.
+* **Do** keep the safe state simple and deterministic.
+* **Don’t** overcomplicate recovery paths; prefer a manual/secure re-enable.
+* **Don’t** use dynamic memory in high-criticality tasks.
+
+---
+
+## 23 — Example safety development flow (practical)
+
+1. **HARA** → list hazards & assign ASIL.
+2. For each hazard, define **system safety goal** and **technical safety requirements**.
+3. Perform **architectural design** and allocate safety requirements to HW/SW.
+4. Do **FMEDA/FMEA**, identify residual risks & required diagnostics.
+5. Implement HW/SW with required diagnostics & redundancy.
+6. Prepare **test plans**: unit, integration, HIL, fault injection.
+7. Run tests, collect evidence, compute DC/SFF, document traceability.
+8. Finalize **safety case** and submit for assessment.
+
+---
+
+## 24 — Closing: What I can provide next
+
+If you want, I can:
+
+* Produce a **safety checklist template** (Excel/CSV) for your project (requirements ↔ tests ↔ FMEDA entries).
+* Draft a **fail-safe state machine** tailored to a specific application (motor control, medical pump, etc.).
+* Create a **sample FMEDA worksheet** and show DC calculations for typical STM32 peripherals.
+* Provide concrete **HIL test scenarios and scripts** for fault injection on STM32.
+
+Which would you like me to produce now? (I can generate a template or example in this conversation immediately.)
+
+
+Nice — I made **three immediate, ready-to-use safety artifacts** you can copy/paste and adapt:
+
+1. **Safety Checklist (CSV)** — requirement → test traceability template.
+2. **Fail-Safe State Machine Example** (motor-control use case) — diagram, transition table, and C skeleton.
+3. **Sample FMEDA Worksheet Snippet** — table + worked example showing diagnostic coverage (DC) calculation and a simple aggregation example.
+
+You can use these right away in docs, spreadsheets, or as the basis for HIL tests. I kept everything concrete and editable.
+
+---
+
+# Safety Checklist (CSV) — paste into Excel / Google Sheets
+
+Copy the block below into a `.csv` file (or paste into Excel). Columns chosen to satisfy traceability and test planning:
+
+```csv
+ReqID,Requirement,Function,ASIL/SIL,DesignAllocation(HW/SW),AcceptanceCriteria,TestID,TestType(Test/Unit/HIL/SIL),TestProcedureSummary,Pass/Fail,Remarks,TraceToCode,TraceToTest
+REQ-001,Motor must stop within 50 ms on overcurrent,MotorControl,ASIL C,HW: Current-sense + Contactor; SW: PID + safety monitor,Stop actuator <50 ms from detection,TST-001,HIL,Inject overcurrent, measure stop time, , ,motor.c:handle_overcurrent(),TST-001
+REQ-002,Firmware shall verify image CRC at boot,Bootloader,ASIL B,SW: Bootloader,CRC valid -> boot; invalid -> revert,TST-002,Unit,Burn bad image and verify fallback, , ,bootloader.c:verify_image(),TST-002
+REQ-003,Node must heartbeat every 100 ms,Supervision,ASIL B,SW: Heartbeat task,Missing heartbeat >300 ms -> SAFE,TST-003,Integration,Stop heartbeat and verify supervisor action, , ,supervisor.c:check_heartbeats(),TST-003
+REQ-004,ADC readings must be within ±2% of calibrated value,Sensing,ASIL A,SW: Calibration + plausibility,Measurements within ±2% post-calibration,TST-004,Calibration,Apply known input, verify ADC output, , ,adc_driver.c:calibrate(),TST-004
+REQ-005,Bootloader region protected from readout via Option Bytes,Security,ASIL D,HW/Config: Option bytes,RDP set and readout prevented,TST-005,Unit,Attempt readout via debug probe, , ,flash_protect.c:apply_option_bytes(),TST-005
+```
+
+Use columns to add actual test artifacts (logs, timestamps), link BOLDED test IDs to your test automation.
+
+---
+
+# Fail-Safe State Machine — Motor Control Example
+
+## 1) High-level states & goal
+
+States: `SAFE`, `DEGRADED`, `OPERATIONAL`, `FAULT`
+Goal: on *critical* fault (overcurrent, brake fail, comms fail) → go to `SAFE` immediately (motor torque removed, contactor open). On recoverable fault → `DEGRADED` (reduced torque, limited RPM). On normal conditions → `OPERATIONAL`.
+
+## 2) ASCII state diagram
+
+```
+   [OPERATIONAL] <--recover-- [DEGRADED]
+        |   \                 /
+   fault|    \recover        /fault
+        v     v             v
+      [FAULT] ------------> [SAFE]
+             criticalFault     ^ 
+             (escalation)      |
+                              reset/manual
+```
+
+## 3) Transition table (condensed)
+
+| From        | Event / Condition                                                  | Action (atomic)                                                               | To          |
+| ----------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------- | ----------- |
+| OPERATIONAL | Overcurrent detected (confirmed by plausibility & sensor watchdog) | Disable PWM outputs, open contactor, log event, start watchdog-assisted reset | SAFE        |
+| OPERATIONAL | Sensor discrepancy but within limits                               | Reduce max torque to 50%, alert operator                                      | DEGRADED    |
+| DEGRADED    | All diagnostics clear for N cycles                                 | Restore normal torque limits                                                  | OPERATIONAL |
+| ANY         | Fatal bootloader CRC fail                                          | Do not start application, blink error, await authenticated recovery           | SAFE        |
+| SAFE        | Manual/authorized reset + self-tests pass                          | Allow re-arm -> OPERATIONAL                                                   | OPERATIONAL |
+
+## 4) C skeleton (synchronous safe actions must be atomic and quick)
+
+```c
+typedef enum {STATE_SAFE, STATE_DEGRADED, STATE_OPERATIONAL, STATE_FAULT} system_state_t;
+static volatile system_state_t g_state = STATE_SAFE;
+
+// Atomic action to stop actuators (direct register writes recommended)
+static inline void do_safe_stop(void) {
+    // stop PWM timers immediately
+    TIM1->CCER = 0; // example: turn off outputs
+    // open main contactor (direct GPIO write)
+    HAL_GPIO_WritePin(CONTACTOR_GPIO_Port, CONTACTOR_Pin, GPIO_PIN_SET);
+    // ensure DAC outputs set to zero or safe level
+    DAC->DHR12R1 = 0;
+    // flush memory barrier to ensure ordering
+    __DSB();
+}
+
+// Called from high-priority context (ISR or supervisor)
+void request_state_transition(system_state_t new_state, const char* reason) {
+    __disable_irq(); // short-critical section
+    if (new_state == STATE_SAFE) {
+        do_safe_stop();
+        // store failure reason to backup RAM immediately
+        store_error_log(reason);
+    } else if (new_state == STATE_DEGRADED) {
+        limit_torque_to(50);
+    }
+    g_state = new_state;
+    __enable_irq();
+    // kick hardware watchdog if needed (from safe supervised context)
+}
+
+// Example ISR for overcurrent comparator
+void OVERCURRENT_IRQHandler(void) {
+    // minimal processing — delegate
+    request_state_transition(STATE_SAFE, "OVERCURRENT");
+}
+```
+
+**Notes:**
+
+* Critical actuator commands must avoid HAL library overhead (use direct MMIO if necessary).
+* log to **backup SRAM** (or battery-backed) for post-mortem before reset.
+* Ensure the `request_state_transition()` path is as short as possible and not preemptible by lower-priority interrupts.
+
+---
+
+# Sample FMEDA Worksheet Snippet & Worked Example
+
+Below is a simplified FMEDA table for one safety function: *Motor stop on overcurrent*. Use this in a spreadsheet and extend rows for each component.
+
+Columns: `Item, Failure Mode, λ_total (FIT), Dangerous? (Y/N), Detectable by?, λ_detected (FIT), Diagnostic method, DC (%)`
+
+Example rows:
+
+| Item               |            Failure Mode |             λ_total (FIT) | Dangerous? | Detectable by?                           |            λ_detected (FIT) | Diagnostic method             |             DC (%) |
+| ------------------ | ----------------------: | ------------------------: | :--------: | ---------------------------------------- | --------------------------: | ----------------------------- | -----------------: |
+| Current Sensor (A) |    Open-circuit (stuck) |                        20 |      Y     | plausibility (other sensor), range check |                          18 | cross-sensor plausibility     |                 90 |
+| Current Sensor (A) |            Short to Vcc |                         5 |      Y     | over-range detection                     |                           5 | ADC over-range                |                100 |
+| MCU (SW)           | Control algorithm stuck |                        10 |      Y     | heartbeat + watchdog                     |                           8 | watchdog+supervisor           |                 80 |
+| Contactor driver   |            Fail to open |                        15 |      Y     | current monitor & contactor feedback     |                          12 | contactor sense, coil current |                 80 |
+| TOTAL (simple sum) |                         | λ_total = 20+5+10+15 = 50 |            |                                          | λ_detected = 18+5+8+12 = 43 |                               | DC = 43 / 50 = 86% |
+
+**Calculation detail (careful arithmetic):**
+
+* Sum dangerous failure rates: `50 FIT`
+* Sum detected portion: `43 FIT`
+* Diagnostic Coverage `DC = 43 / 50 = 0.86 → 86%`
+
+**Interpretation:**
+
+* DC 86% may be OK for lower SIL/ASIL but likely insufficient for high ASIL C/D. To raise DC:
+
+  * Add redundancy (duplicate sensor), or
+  * Add digital comparator (independent check), or
+  * Increase diagnostic frequency / use additional monitors.
+
+---
+
+# Quick HIL Test Scenarios (immediately runnable checklist)
+
+Use these with your HIL rig or test harness:
+
+1. **Overcurrent injection**
+
+   * Inject simulated current spike; verify state transition to `SAFE` within ≤50 ms; log time.
+2. **Sensor stuck-at / drift**
+
+   * Force sensor to fixed value; verify plausibility detectors flag and system enters `DEGRADED`.
+3. **Firmware corruption**
+
+   * Corrupt CRC field in flash image; reboot and verify bootloader rejects image and returns safe state.
+4. **Clock failure**
+
+   * Simulate HSE failure (toggle clock input in lab) and verify CSS triggers, MCU enters safe mode or switches to HSI safely.
+5. **Backup power failover**
+
+   * Remove main VDD while VBAT powers RTC; verify system records last state and recovers correctly after power restored.
+6. **Watchdog suppression**
+
+   * Make critical task block; ensure IWDG causes reset and logs reason in backup SRAM.
+7. **Two-sensor disagreement**
+
+   * Provide divergent readings from redundant sensors; check voting logic and safe action.
+8. **Contactor fail to open**
+
+   * Emulate contactor stuck-closed; check detection via contactor-current sense and final safe fallback (e.g., mechanical brake).
+
+For each scenario capture:
+
+* Start timestamp (DWT cycles)
+* Time-to-detect (cycles → µs)
+* Time-to-actuate safe state
+* Post-mortem logs (backup SRAM contents)
+
+---
+
+# How to use these artifacts immediately
+
+* Paste CSV into an Excel sheet and add real test steps and Pass/Fail columns. Link `TestID`s to your automated test cases or JIRA tickets.
+* Drop the state-machine code skeleton into your safety module; replace `do_safe_stop()` internals with your exact actuator register writes.
+* Import FMEDA table into your FMEDA tool or spreadsheet; replace FIT numbers with vendor FIT-data or use conservative assumptions, then iterate adding diagnostics until DC meets target ASIL/SIL.
+* Implement HIL scenarios in your existing test runner. Use DWT cycle counter for precise timing measurement.
+
+---
+
+If you want, I can now:
+
+* Generate the **CSV file** and provide it as a downloadable file here, or
+* Produce a **complete FMEDA spreadsheet** (more rows, formulas) and give a downloadable `.xlsx` (I can generate it immediately), or
+* Tailor the fail-safe state machine and HIL tests to your **specific application** (tell me: motor type, sensors, actuators) and I’ll produce ready-to-run test scripts and code.
+
+Which of those would you like next?
+
+Great — I’ll assume a concrete, realistic application and produce a **tailored fail-safe state machine** plus **ready-to-run HIL test scripts and code skeletons** you can drop into your project or HIL runner. I’ll state assumptions up front so you can quickly adapt if your real system differs.
+
+---
+
+## Assumptions (if these don't match your system, tell me and I'll re-tailor)
+
+* MCU family: **STM32H7** (Cortex-M7 primary control + Cortex-M4 safety/monitoring domain). If you use a single-core STM32, move all safety code into highest-priority core/task and remove inter-core sync.
+* Motor: **3-phase BLDC (inverter driven)** with PWM inputs from MCU.
+* Sensors:
+
+  * **Shunt current sensor** (single shunt measured by ADC1).
+  * **3 Hall sensors** (digital inputs) for commutation fallback.
+  * **Incremental encoder (ABZ)** on TIM encoder interface (high-resolution for closed loop).
+* Actuators:
+
+  * **3-phase inverter** driven by TIMx PWM (complementary outputs + deadtime).
+  * **Main contactor** controlled by GPIO.
+  * **Mechanical brake** controlled by GPIO (optional).
+* Safety targets:
+
+  * **Critical**: stop motor within **≤50 ms** on overcurrent or encoder failure.
+  * **Degraded**: reduce torque / speed when sensor disagreement occurs.
+  * Heartbeat: node must publish at **100 ms** intervals (supervisor timeout 300 ms).
+
+If those match, great — if not, swap names/ports accordingly in the code below.
+
+---
+
+# 1 — Fail-Safe State Machine (Motor Control)
+
+### States
+
+* `STATE_SAFE` — actuators OFF, contactor open, brake engaged.
+* `STATE_INITIALIZE` — power-up self-tests and calibration.
+* `STATE_OPERATIONAL` — normal closed-loop control (speed/torque).
+* `STATE_DEGRADED` — reduced capability (limited torque / open-loop fallback on Hall sensors).
+* `STATE_FAULT` — non-recoverable fault; requires manual/authorized reset.
+
+### Events (examples)
+
+* `EVT_BOOT_OK`, `EVT_SELFTEST_FAIL`
+* `EVT_OVERCURRENT`, `EVT_ENCODER_LOST`, `EVT_SENSOR_DISAGREE`
+* `EVT_HEARTBEAT_MISSED`, `EVT_MANUAL_RESET`, `EVT_RECOVERY_OK`
+* `EVT_WATCHDOG_RESET` (post-reset diagnostic log)
+
+### Transition rules (high-level)
+
+* On boot → `INITIALIZE`. If self-tests pass → `OPERATIONAL`. Else → `SAFE`.
+* `OPERATIONAL` & `OVERCURRENT` or `ENCODER_LOST` → immediate atomic action → `SAFE`.
+* `OPERATIONAL` & `SENSOR_DISAGREE` → `DEGRADED` (limit torque to 50%) and alert operator.
+* `DEGRADED` & diagnostics clear for `N` consecutive cycles → `OPERATIONAL`.
+* `ANY` → `FAULT` on repeated unrecoverable errors or corrupted boot image.
+
+---
+
+# 2 — C Code: Safety Module (skeleton, ready to adapt)
+
+Drop this into your safety-critical file (e.g., `safety.c/.h`). Replace peripheral names with your board's.
+
+```c
+// safety.h
+#pragma once
+#include <stdint.h>
+typedef enum { STATE_SAFE, STATE_INITIALIZE, STATE_OPERATIONAL, STATE_DEGRADED, STATE_FAULT } system_state_t;
+void Safety_Init(void);
+void Safety_RequestState(system_state_t newState, const char *reason);
+system_state_t Safety_GetState(void);
+void Safety_ISR_Overcurrent(void); // called from comparator/ADC ISR
+void Safety_PeriodicTick(void); // called at 1ms or 10ms from SysTick or low-priority timer
+
+// safety.c
+#include "safety.h"
+#include "stm32h7xx.h" // replace with your HAL header
+#include "backup_log.h" // helper to write to backup SRAM
+#include "actuator.h"   // PWM/contactor low-level functions
+
+static volatile system_state_t g_state = STATE_SAFE;
+static volatile uint32_t g_state_timestamp_ms = 0;
+
+// atomic actuator stop: direct register ops for determinism
+static inline void do_safe_stop(void) {
+    // Immediate: disable PWM outputs via timer registers (no HAL)
+    TIM1->CCER = 0; // example direct stop - change per timer used
+    // Open main contactor
+    HAL_GPIO_WritePin(CONTACTOR_GPIO_Port, CONTACTOR_Pin, GPIO_PIN_SET);
+    // Engage brake if available
+    HAL_GPIO_WritePin(BRAKE_GPIO_Port, BRAKE_Pin, GPIO_PIN_SET);
+    // Optional: set DACs to safe value
+    __DSB(); __ISB();
+}
+
+// limit torque (degraded): use register writes or a safe API
+static inline void limit_torque_50pct(void) {
+    // Example: scale down PWM compare values via atomic update
+    actuator_set_torque_limit_percent(50);
+}
+
+// short critical section for state transitions
+void Safety_RequestState(system_state_t newState, const char *reason) {
+    __disable_irq();
+    if (newState == STATE_SAFE) {
+        do_safe_stop();
+        backup_log_store(reason); // persist cause for post-mortem
+    } else if (newState == STATE_DEGRADED) {
+        limit_torque_50pct();
+    } else if (newState == STATE_INITIALIZE) {
+        // keep actuators disabled until init done
+        do_safe_stop();
+    }
+    g_state = newState;
+    g_state_timestamp_ms = HAL_GetTick(); // or DWT cycles translated to ms
+    __enable_irq();
+}
+
+// Exposed helper
+system_state_t Safety_GetState(void) { return g_state; }
+
+// Overcurrent ISR called from comparator/ADC ISR context (very short)
+void Safety_ISR_Overcurrent(void) {
+    // minimal, delegate - but call safe stop immediately
+    Safety_RequestState(STATE_SAFE, "OVERCURRENT");
+}
+
+// Periodic tick (1ms or 10ms) for monitoring heartbeats, declared in systick or RTOS timer
+void Safety_PeriodicTick(void) {
+    static uint16_t heartbeat_miss_counter = 0;
+    // check heartbeat flag updated by comms
+    if (!heartbeat_seen()) {
+        if (++heartbeat_miss_counter > 3) { // 300ms missing -> safe
+            Safety_RequestState(STATE_SAFE, "HEARTBEAT_MISSED");
+        }
+    } else heartbeat_miss_counter = 0;
+    // other periodic checks: stack watermark, CRC status, ADC plausibility
+    if (adc_plausibility_fail()) {
+        // if severe, go SAFE; else DEGRADED logic
+        Safety_RequestState(STATE_DEGRADED, "ADC_PLAUSIBILITY");
+    }
+}
+```
+
+**Notes & best practices**
+
+* `do_safe_stop()` uses direct register writes to avoid HAL latency.
+* Keep ISRs and `Safety_RequestState()` short; heavy logging or comms after safe stop is asynchronous.
+* `backup_log_store()` must write to battery-backed SRAM (or specially protected Flash) with minimal delay.
+
+---
+
+# 3 — HIL Test Suite (CSV + Automated Runner Outline)
+
+Below is a CSV you can import into your HIL runner or test management tool (Jenkins, TestStand, custom Python runner). It lists test steps, expected observations, and pass criteria.
+
+```csv
+TestID,Description,Preconditions,Action,ExpectedResult,MaxDetectionTime_ms,Notes
+HIL-001,Overcurrent -> Safe stop,System in OPERATIONAL,Inject current spike > 2x rated for 10ms,System enters STATE_SAFE,<=50,Measure using DWT timestamps; verify contactor open and PWM disabled
+HIL-002,Encoder loss -> Safe stop,System in OPERATIONAL,Remove encoder A signal (stuck),System enters STATE_SAFE,<=50,Ensure fallback to Hall not available; verify logged reason
+HIL-003,Sensor disagreement -> Degrade,Operational,Feed different values in redundant sensors (A != B by >20%),System enters STATE_DEGRADED,<=100,Verify torque limited to 50%
+HIL-004,Heartbeat missing -> Safe stop,Operational,Stop heartbeat publication from node,Supervisor detects and transitions to SAFE,<=300,Supervisor check window=300ms
+HIL-005,Corrupt firmware image -> Boot safe,Power cycle with corrupted CRC in app image,Bootloader refuses app, stays in SAFE,Immediate,Verify bootloader log & cannot run app
+HIL-006,Contactor fail to open -> Final fallback,Inject contactor stuck-closed while stopping,Detect via coil current sensor and enter FAULT or activate mechanical brake,<=100,Verify mechanical brake engaged as secondary
+HIL-007,Watchdog recovery,Operational,Block main control loop to prevent watchdog feed,IWDG resets system and bootloader logs reason,<=IWDG_timeout_ms,Verify backup SRAM contains pre-reset logs
+```
+
+---
+
+## 4 — Automated HIL Runner Example (Python pseudocode)
+
+This is a simple runner using pyserial (talk to DUT over UART for SW control / logs) and a programmable power/current source or fault injection box API. Adapt to your lab hardware.
+
+```python
+# hil_runner.py (pseudo)
+import serial, time
+from duts import set_injected_current, toggle_signal, read_dut_state, read_backup_log
+
+SERIAL_PORT = '/dev/ttyUSB0'
+ser = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+
+def send_cmd(cmd):
+    ser.write((cmd + "\n").encode())
+    return ser.readline().decode().strip()
+
+def test_overcurrent():
+    print("Ensure DUT is OPERATIONAL")
+    send_cmd("set_mode OPERATIONAL")
+    time.sleep(0.1)
+    t0 = send_cmd("dwt_ms")  # fetch DUT timestamp
+    set_injected_current(5.0)  # amps, above threshold
+    time.sleep(0.02) # 20ms
+    set_injected_current(0.0)
+    # poll state
+    for _ in range(50):
+        state = send_cmd("get_state")
+        if state == "STATE_SAFE":
+            t1 = send_cmd("dwt_ms")
+            dt = int(t1) - int(t0)
+            print("Detected SAFE in", dt, "ms")
+            return dt <= 50
+        time.sleep(0.01)
+    return False
+
+if __name__ == "__main__":
+    ok = test_overcurrent()
+    print("Overcurrent test pass:", ok)
+```
+
+**Integrations**
+
+* `duts.py` would speak to power supply/fault injector via SCPI or vendor API.
+* The DUT must expose simple diagnostic UART commands:
+
+  * `get_state`, `dwt_ms`, `dump_backup_log`, `set_mode`.
+
+If you already have a test framework, port these steps as test cases.
+
+---
+
+# 5 — Measurement & Instrumentation Guidance
+
+* Use **DWT cycle counter** on MCU for sub-microsecond timestamps. Expose `DWT->CYCCNT` to test harness scaled to ms via core clock.
+* Log three timing points for each HIL test:
+
+  1. **Event injection** timestamp (t_inj)
+  2. **Detection** timestamp (t_detect) — when safety module triggers state change
+  3. **Actuation complete** timestamp (t_act) — when PWM disabled & contactor open
+* Compute `time_to_detect = t_detect - t_inj` and `time_to_safe = t_act - t_inj`. Verify `time_to_safe <= 50 ms`.
+* Capture analog waveforms (shunt voltage, contactor coil current) via scope for validation.
+
+---
+
+# 6 — Example Boot/Command API on DUT (UART commands)
+
+Implement a minimal UART CLI on the DUT that your HIL runner can use. This allows safe, deterministic control for tests.
+
+```c
+// uart_cli.c - pseudo
+if (strcmp(cmd, "get_state")==0) { printf("%s\n", state_name(Safety_GetState())); }
+if (strcmp(cmd, "dwt_ms")==0) { uint32_t ms = DWT_CYCCNT_to_ms(DWT->CYCCNT); printf("%u\n", ms); }
+if (strcmp(cmd, "dump_backup_log")==0) { backup_log_dump_via_uart(); }
+if (strcmp(cmd, "set_mode OPERATIONAL")==0) { Safety_RequestState(STATE_OPERATIONAL, "HIL_CMD"); }
+```
+
+---
+
+# 7 — HIL Test Implementation Tips / Lab Setup
+
+Hardware needs:
+
+* **Programmable current source** or fault injector to simulate overcurrent and contactor-stuck conditions.
+* **Signal generator / digital I/O** to drive encoder/Hall line faults.
+* **Oscilloscope** to capture PWM, shunt, contactor coil current.
+* **Serial link** for command & log (UART) and power measurement.
+
+Software:
+
+* Provide the DUT with minimal CLI and a log streaming protocol (binary or text) with timestamps.
+* Use the HIL runner to auto-run test matrix and save per-run artifacts (CSV, scope screenshots).
+
+---
+
+# 8 — Extra: Post-mortem Log Structure (backup SRAM)
+
+Simple binary log to store last fault:
+
+```c
+typedef struct {
+    uint32_t magic;      // e.g., 0xDEADF00D
+    uint32_t boot_count;
+    uint32_t last_state;
+    uint32_t last_event_timestamp_ms;
+    char reason[32];
+    uint32_t crc32;
+} last_fault_t;
+
+void backup_log_store(const char* reason) {
+    last_fault_t lf;
+    lf.magic = 0xDEADF00D;
+    lf.boot_count = read_boot_count() + 1;
+    lf.last_state = (uint32_t)g_state;
+    lf.last_event_timestamp_ms = HAL_GetTick();
+    strncpy(lf.reason, reason, sizeof(lf.reason)-1);
+    lf.crc32 = calc_crc32((uint8_t*)&lf, sizeof(lf)-4);
+    memcpy_to_bkp_sram(&lf, sizeof(lf));
+}
+```
+
+On boot, the bootloader reads this structure to decide whether to keep in SAFE and dump logs over UART for automated test capture.
+
+---
+
+# 9 — Deliverables I can generate now (pick any or multiple)
+
+* A ready-to-run **.c/.h** safety module filled in with your exact pin/timer names (I can produce them now if you paste your `boards.h` pin definitions).
+* A ready-to-run **Python HIL runner** that uses your lab instruments (I’ll adapt SCPI code if you provide instrument models).
+* An **Excel (.xlsx)** Sheet with the HIL test cases, expected timing columns, and formulas to auto-evaluate pass/fail per run (I can generate and give a download link).
+* A **complete FMEDA spreadsheet** for the motor stop function (expanded from the earlier snippet) including formulas to compute DC and SFF.
+
+Tell me which of those you want me to produce immediately and — if you want any of the code wired to real pin names — paste your `boards.h` (GPIO/timer mapping) or a short list of which timers/PWM channels and ADC channels you use and I’ll generate concrete code mapped to your hardware (no waiting; I’ll do it in this response).
