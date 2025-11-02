@@ -4,7 +4,6 @@
 * *Instance* of the program execution.
 * Progress in a sequential fashion.
 
-
 | Program | Category | Process |
 | ------- | -------- | ------- |
 | *Passive* | Entity | *Active* |
@@ -15,4 +14,5 @@
 Process memory is divided into four sections for efficient working
 | Memory Section | Description |
 | -------------- | ----------- |
-| *Text* | Compiled program code<br>Rread in from non-volatile storage during launch [`.exe` Windows, `.elf` Linux]
+| *Text*/ *Code* | Compiled program code<br>Read in from non-volatile storage during launch<br>Read-only permission<br>Size :- Depends  on the number of instructions and the program’s complexity<br>Example :- [`.exe` Windows, `.elf` Linux] |
+| Data | Consists of Gobal and Static variables<br>Variables retain their values throughout program execution<br>Allocated and initialized prior to executing the main<br>Two types --<br>`bss` Block Started by Symbol - unitialized<br>initialized |
